@@ -67,6 +67,8 @@ CC_VERSION=2.0 CC_SEQUENCE=2 ./fabric/scripts/deploy-chaincode.sh
 
 Steps: vendor → package → install → approve (Org1MSP) → checkcommitreadiness → commit → verify. All steps are idempotent — re-running with the same version/sequence is safe.
 
+**CaaS (Chaincode as a Service)**: the peer does not build the chaincode image. The image is built on the host (`docker build -t kyccc-service:1.0 chaincode/`) and the peer connects to it over gRPC on port 7052. The deployment script creates a manual CaaS package (a tar archive containing `metadata.json` + `code.tar.gz`) because Fabric 2.5's peer CLI has no `--type ccaas` flag.
+
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `FABRIC_CHAINCODE` | `kyccc` | Chaincode name |
@@ -94,3 +96,12 @@ CC_VERSION=1.0 CC_SEQUENCE=1 ./fabric/scripts/deploy-chaincode.sh
 ```
 
 Chaincode sequence resets to 1 on a fresh network — always start with `CC_SEQUENCE=1`.
+
+## Known Issues
+
+| Issue | Fix |
+|-------|-----|
+| Go 1.22 rejects ECDSA cert from `cryptogen` | Delete `fabric/crypto-config/` and re-run `cryptogen` — second run produces compatible keys |
+| Stale Docker bind mount after regeneration | Restart peer/fabric-cli containers after deleting and regenerating `crypto-config/` |
+| `channel_exists()` always false | Container name lookup uses `docker ps --filter "name=fabric-cli"` (substring match) — ensure no other containers match |
+| etcdraft requires TLS | All three services (orderer, peer, fabric-cli) need TLS env vars and matching volume mounts in `docker-compose.yml` |

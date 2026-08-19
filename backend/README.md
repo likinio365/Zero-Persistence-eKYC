@@ -1,156 +1,164 @@
-# Backend — KYC API Server
+# Backend — Node.js / Express API
 
-Node.js / Express REST API that connects the frontend to Hyperledger Fabric, ACA-Py, and IPFS.
+TypeScript Express application providing the KYC lifecycle REST API. Bridges Hyperledger Fabric (ledger), IPFS (document storage), HashiCorp Vault (encryption), and ACA-Py (verifiable credentials).
 
-## Stack
-
-- **Runtime**: Node.js 20, TypeScript
-- **Framework**: Express 4
-- **Fabric SDK**: `@hyperledger/fabric-gateway` v1.x (explicit gRPC + TLS via `@grpc/grpc-js`)
-- **Auth**: JWT (`jsonwebtoken`) — `user` and `verifier` roles
-- **Validation**: Zod schemas
-- **Encryption**: AES-256-GCM + HKDF (Node.js built-in `crypto`)
-
-## Commands
-
-```bash
-npm install
-npm run dev       # ts-node-dev with hot reload on :3000
-npm run build     # compile TypeScript → dist/
-npm start         # run compiled dist/index.js
-npm test          # jest (all test files)
-npm run lint      # eslint
-```
-
-## Project structure
+## Project Structure
 
 ```
-src/
+backend/src/
+├── index.ts                      # entry point — async IIFE, dynamic imports after bootstrap
+├── bootstrap.ts                  # fetches Vault KV secrets → populates process.env
 ├── config/
-│   ├── index.ts              # typed config object from env vars
-│   └── logger.ts             # winston logger
-├── middleware/
-│   ├── auth.middleware.ts    # JWT verify (authMiddleware) + verifier role guard
-│   └── validation.middleware.ts  # Zod schemas for POST /kyc and PUT /kyc/:id/verify
-├── routes/
-│   ├── auth.routes.ts        # POST /api/auth/login
-│   ├── kyc.routes.ts         # KYC lifecycle
-│   ├── did.routes.ts         # DID management + DIDComm
-│   └── document.routes.ts    # multer upload → IPFS
+│   └── index.ts                  # typed config object (Fabric, ACA-Py, IPFS, Vault, auth, port)
 ├── services/
-│   ├── encryption.service.ts # AES-256-GCM + HKDF per-document key derivation
-│   ├── fabric.service.ts     # Hyperledger Fabric Gateway client
-│   ├── indy.service.ts       # ACA-Py REST client (DID, VC, DIDComm)
-│   └── ipfs.service.ts       # IPFS Kubo API client
-├── types/
-│   └── kyc.types.ts          # shared TypeScript types
-└── index.ts                  # app entry point, route mounting
+│   ├── fabric.service.ts         # Fabric Gateway v1.x — all chaincode calls
+│   ├── vault.service.ts          # Vault Transit — per-KYC-ID encrypt/decrypt
+│   ├── ipfs.service.ts           # IPFS Kubo — upload/download/pin/unpin
+│   └── indy.service.ts           # ACA-Py REST — DID, VC issuance, revocation, connections
+├── routes/
+│   ├── kyc.routes.ts             # KYC lifecycle
+│   ├── bank.routes.ts            # bank verifier (ZKP proof flow)
+│   ├── did.routes.ts             # DID management
+│   ├── document.routes.ts        # document upload / retrieval
+│   └── auth.routes.ts            # JWT login
+├── middleware/
+│   ├── auth.middleware.ts        # JWT verify + requireVerifier + requireBank role guards
+│   └── validation.middleware.ts  # Zod schemas for submit and verify requests
+└── types/
+    └── kyc.types.ts              # shared TS types
 ```
 
-## API endpoints
+## Services
 
-All endpoints except `/health` and `POST /api/auth/login` require `Authorization: Bearer <token>`.
+### FabricService
+`@hyperledger/fabric-gateway` v1.x client with explicit gRPC+TLS via `@grpc/grpc-js`. Reads TLS CA cert and Admin identity directly from `crypto-config/`. No connection profile file needed.
+
+### VaultService
+HashiCorp Vault Transit Secrets Engine. Creates a per-KYC-ID named key (`kyc/<id>`) on first use. All document encryption/decryption is delegated to Vault — the backend never sees raw plaintext keys. Cipher: `aes256-gcm96`.
+
+### IpfsService
+IPFS Kubo HTTP API client. Uploads blobs with CIDv1 + pinning. Downloads and unpins on GDPR erasure.
+
+### IndyService
+ACA-Py REST client. Handles DID creation, ledger publication (`POST /ledger/register-nym`), VC issuance (v2.0), revocation, and DIDComm connection lookups.
+
+## API
 
 ### Auth
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/api/auth/login` | — | Returns a signed JWT with `user` or `verifier` role |
+| POST | `/api/auth/login` | — | Returns signed JWT with `user`, `verifier`, or `bank` role |
 
-### KYC
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `GET` | `/api/kyc?status=PENDING` | user/verifier | List records by status |
-| `POST` | `/api/kyc` | user/verifier | Submit KYC — requires passport + selfie (encrypts docs → IPFS → Fabric) |
-| `GET` | `/api/kyc/:id` | user/verifier | Get single record |
-| `GET` | `/api/kyc/:id/history` | user/verifier | Full on-chain audit trail |
-| `GET` | `/api/kyc/:id/documents` | **verifier** | Decrypt and return document previews |
-| `GET` | `/api/kyc/did/:did` | user/verifier | Query records by DID |
-| `PUT` | `/api/kyc/:id/verify` | **verifier** | `PENDING → VERIFIED` + issue VC |
-| `PUT` | `/api/kyc/:id/reject` | **verifier** | `PENDING → REJECTED` with optional reason |
-| `PUT` | `/api/kyc/:id/revoke` | **verifier** | `VERIFIED → REVOKED` |
-
-### DID
+### KYC Lifecycle
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/api/did` | user/verifier | Create a new DID in the ACA-Py wallet |
-| `GET` | `/api/did/:did` | user/verifier | Resolve DID document |
-| `GET` | `/api/did/:did/credentials` | user/verifier | List issued VCs for a DID |
-| `POST` | `/api/did/:did/connect` | user/verifier | Create OOB DIDComm invitation |
-| `GET` | `/api/did/:did/connection-status` | user/verifier | Check if DIDComm connection is active |
+| GET | `/api/kyc` | verifier | List all KYC records (optional `?status=PENDING`) |
+| POST | `/api/kyc` | user | Submit new KYC application |
+| GET | `/api/kyc/:id` | user/verifier | Get KYC record by ID |
+| GET | `/api/kyc/:id/history` | user/verifier | Full on-chain audit trail |
+| GET | `/api/kyc/:id/documents` | verifier | Decrypt + return all documents as base64 previews |
+| PUT | `/api/kyc/:id/verify` | verifier | Approve KYC; issue VC (best-effort) |
+| PUT | `/api/kyc/:id/reject` | verifier | Reject with optional reason |
+| PUT | `/api/kyc/:id/revoke` | verifier | Revoke KYC + VC |
+| PUT | `/api/kyc/:id/resubmit` | user | Upload new documents after rejection or re-submit after verification |
+| DELETE | `/api/kyc/:id` | user | GDPR Art. 17 erasure — unpin IPFS, delete Vault key, revoke VC, mark DELETED |
+| GET | `/api/kyc/:id/my-data` | user | GDPR Art. 15 — export all personal data for a KYC record |
+
+### Wallet (VC Issuance to BC Wallet)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/kyc/:id/wallet-invitation` | user | Create OOB DIDComm invitation → QR data |
+| GET | `/api/kyc/:id/wallet-connection/:oobId` | user | Poll connection status |
+| POST | `/api/kyc/:id/send-credential` | user | Issue VC to connected wallet |
+
+### DID Management
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/did` | user | Create DID in ACA-Py wallet + publish to Indy ledger |
+| GET | `/api/did/:did` | user | Resolve DID |
+| GET | `/api/did/:did/credentials` | user | List credentials held for DID |
+| POST | `/api/did/:did/connect` | user | Create OOB invitation for DIDComm connection |
+| GET | `/api/did/:did/connection-status` | user | Poll connection state |
+
+### Bank Verification (ZKP)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/bank/invitation` | bank | Create OOB QR invitation via bank-acapy |
+| GET | `/api/bank/connection/:oobId` | bank | Poll DIDComm connection |
+| POST | `/api/bank/proof-request` | bank | Send AnonCreds proof request (`age ≥ 18`) |
+| GET | `/api/bank/proof-result/:presExId` | bank | Poll proof verification result; calls verify-presentation if needed |
 
 ### Documents
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/api/documents/upload` | user/verifier | Upload a single file (multer, 10 MB limit) → IPFS |
-| `GET` | `/api/documents/:cid?documentId=` | user/verifier | Download and decrypt a document by CID |
-
-## KYC submission flow
-
-1. Frontend sends `POST /api/kyc` with `did` + array of base64 documents — `passport` and `selfie` are required (validated server-side)
-2. Each document is encrypted with a per-document key derived via HKDF from `${kycId}-${doc.type}` and uploaded to IPFS
-3. An encrypted manifest `{ kycId, did, documents: [{ type, fileName, cid }] }` is built and uploaded to IPFS — only the manifest CID goes on-chain
-4. `FabricService.submitKYC(id, did, manifestCid)` writes a `KYCRecord{ status: PENDING }` to the Fabric ledger
+| POST | `/api/documents/upload` | user | Multer upload → IPFS (10 MB limit) |
+| GET | `/api/documents/:cid` | user | Download + decrypt document by CID |
 
 ## Encryption
 
-All document encryption uses `EncryptionService` (`src/services/encryption.service.ts`):
+All documents are encrypted using **HashiCorp Vault Transit** (`aes256-gcm96`). A named key is created per KYC ID — Vault manages key material and rotation. The backend only passes ciphertext in and out; plaintext keys never leave Vault.
 
-- **Algorithm**: AES-256-GCM
-- **Key derivation**: HKDF-SHA256 — a unique 32-byte key per document, derived from `ENCRYPTION_MASTER_KEY` with the `documentId` as salt
-- **Master key**: read from `ENCRYPTION_MASTER_KEY` env var (64 hex chars / 32 bytes)
+Data flow for document submission:
+1. Each document encrypted individually with `VaultService.encrypt(kycId, plaintextBase64)`
+2. Encrypted blobs uploaded to IPFS
+3. A manifest JSON (`{ kycId, did, documents: [{ type, fileName, cid }], dateOfBirth? }`) is encrypted and also uploaded to IPFS
+4. Only the **manifest CID** is written to the Fabric ledger
 
-> **Never change `ENCRYPTION_MASTER_KEY` after first use** — all existing IPFS documents become unreadable.
+## Vault Bootstrap
 
-## Fabric connection
+`bootstrap.ts` runs before any other module. It fetches all secrets from Vault KV (`secret/kyc`) and writes them into `process.env`. Then `index.ts` uses `await import()` (dynamic) for all modules that depend on config, ensuring `config/index.ts` evaluates after secrets are in place.
 
-`FabricService` uses `@hyperledger/fabric-gateway` with explicit gRPC TLS:
+If Vault is unreachable, bootstrap logs a warning and continues — the service will fail later on the first encrypted operation.
 
-- TLS CA cert: `crypto-config/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt`
-- Admin identity: `crypto-config/.../users/Admin@org1.example.com/msp/`
-- Peer: `peer0.org1.example.com:7051`
+## Authentication
 
-The connection is lazy (established on first transaction) and reused across requests.
+JWT Bearer tokens issued by `POST /api/auth/login`. Three roles:
 
-## Environment variables
+| Role | Credentials env vars | Access |
+|------|---------------------|--------|
+| `user` | `USER_USERNAME` / `USER_PASSWORD` | submit, status, resubmit, wallet, GDPR delete |
+| `verifier` | `VERIFIER_USERNAME` / `VERIFIER_PASSWORD` | approve, reject, revoke, documents |
+| `bank` | `BANK_USERNAME` / `BANK_PASSWORD` | bank proof flow |
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `3000` | HTTP listen port |
-| `NODE_ENV` | `development` | |
-| `ENCRYPTION_MASTER_KEY` | — | **Required.** 64 hex chars. Never change after first run. |
-| `JWT_SECRET` | `change-me-jwt-secret` | **Change before any non-local deployment.** |
-| `VERIFIER_USERNAME` / `VERIFIER_PASSWORD` | `verifier` / `verifier-pass` | Verifier credentials |
-| `USER_USERNAME` / `USER_PASSWORD` | `user` / `user-pass` | Applicant credentials |
-| `FABRIC_CHANNEL` | `kycchannel` | Fabric channel name |
-| `FABRIC_CHAINCODE` | `kyccc` | Chaincode name |
-| `FABRIC_CRYPTO_CONFIG_PATH` | `./crypto-config` | Path to Fabric crypto material |
-| `FABRIC_MSP_ID` | `Org1MSP` | MSP identifier |
-| `FABRIC_AS_LOCALHOST` | `false` | Set `true` when running backend outside Docker |
-| `ACAPY_ADMIN_URL` | `http://localhost:8031` | ACA-Py admin API base URL |
-| `ACAPY_API_KEY` | — | ACA-Py admin API key (if configured) |
-| `IPFS_API_URL` | `http://localhost:5001` | Kubo IPFS API URL |
-| `CORS_ORIGIN` | `http://localhost` | Allowed CORS origin |
+## Development
+
+```bash
+cd backend
+npm install
+npm run dev        # ts-node-dev hot reload on :3000
+npm test           # jest
+npm run lint       # eslint
+npm run build      # compile → dist/
+```
+
+## Key Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `VAULT_ADDR` | Vault address (default `http://vault:8200`) |
+| `VAULT_TOKEN` | Vault token |
+| `VAULT_ENABLED` | Must be `true` — otherwise `validateConfig()` throws |
+| `FABRIC_CHANNEL` | Channel name (default `kycchannel`) |
+| `FABRIC_CHAINCODE` | Chaincode name (default `kyccc`) |
+| `FABRIC_MSP_ID` | MSP ID (default `Org1MSP`) |
+| `FABRIC_CRYPTO_CONFIG_PATH` | Path to crypto material |
+| `ACAPY_ADMIN_URL` | KYC issuer ACA-Py admin URL |
+| `BANK_ACAPY_ADMIN_URL` | Bank verifier ACA-Py admin URL |
+| `JWT_SECRET` | JWT signing secret |
+| `CORS_ORIGIN` | Allowed CORS origin |
+
+See `.env.example` for the full list.
 
 ## Docker
 
 ```bash
-docker compose up -d backend
-docker compose logs -f backend
-
-# After rebuilding (required on WSL2 — plain restart fails):
 docker compose build backend
 docker compose up -d --force-recreate backend
+docker compose logs -f backend
 ```
-
-## Testing
-
-```bash
-npm test               # run all tests
-npm run test:watch     # watch mode
-```
-
-Tests use Jest + Supertest. Services are injected with mock contracts/axios instances — no live Fabric, ACA-Py, or IPFS required.

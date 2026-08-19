@@ -22,7 +22,7 @@ yarn-debug.log*
 
 # ── Go ────────────────────────────────────────────────────────────────────────
 chaincode/vendor/
-chaincode/vendor.bak/
+chaincode/vendor.bak
 # compiled binary and test artefacts
 chaincode/chaincode
 chaincode/*.out

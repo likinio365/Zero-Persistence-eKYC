@@ -1,118 +1,116 @@
-# Frontend — KYC React App
+# Frontend — React KYC Application
 
-React SPA that provides the user-facing KYC submission flow and the verifier admin panel.
-
-## Stack
-
-- **Framework**: React 18, TypeScript
-- **Routing**: React Router v6
-- **HTTP**: Axios (with JWT interceptor)
-- **Build**: Create React App (react-scripts 5)
-
-## Commands
-
-```bash
-npm install
-npm start         # CRA dev server on :3000
-npm run build     # production build → build/
-npm test          # jest + React Testing Library
-npm run lint      # eslint
-```
-
-> **Docker build note**: use `npm install --legacy-peer-deps` (peer dep conflicts with CRA). This is already set in `Dockerfile`.
-
-## Project structure
-
-```
-src/
-├── components/
-│   ├── DocumentUpload/     # single-file drop zone (image preview + PDF support)
-│   ├── KYCForm/            # DID input + multi-document upload form
-│   └── VerificationStatus/ # status badge, record details, on-chain history
-├── pages/
-│   ├── Home.tsx            # landing page
-│   ├── Login.tsx           # username/password form → JWT stored in localStorage
-│   ├── Submit.tsx          # wraps KYCForm, handles submission result
-│   ├── Status.tsx          # search by Application ID, shows VerificationStatus
-│   └── Verifier.tsx        # verifier admin panel (3 tabs + document viewer)
-├── services/
-│   └── api.ts              # APIClient (axios) + token helpers
-├── types/
-│   └── kyc.ts              # shared TypeScript types
-└── App.tsx                 # router, nav, RequireAuth / RequireVerifier guards
-```
-
-## Auth
-
-JWT is stored in `localStorage` (`kyc_token` + `kyc_role`). The axios interceptor attaches it automatically to every request. On `401` the token is cleared and the user is redirected to `/login`.
-
-Role-based guards in `App.tsx`:
-- `RequireAuth` — redirects unauthenticated users to `/login`
-- `RequireVerifier` — additionally checks `role === 'verifier'`; redirects others to `/`
-
-Same-tab login/logout is synced via a custom `auth-change` event; cross-tab via the `storage` event.
+React (TypeScript, Create React App) web interface for the KYC system. Serves applicants, verifiers, and the SSI Trust Triangle wallet flow.
 
 ## Pages
 
-| Path | Auth | Description |
-|------|------|-------------|
-| `/login` | public | Username/password form |
-| `/` | user/verifier | Home — links to Submit and Status |
-| `/submit` | user/verifier | KYC submission form |
-| `/status` | user/verifier | Look up a KYC record by Application ID |
-| `/status/:id` | user/verifier | Direct link to a specific record |
-| `/verifier` | **verifier** | Admin panel |
+| Route | Auth | Description |
+|-------|------|-------------|
+| `/` | any | Home — project overview and navigation |
+| `/login` | — | Username/password form; stores JWT + role, redirects after success |
+| `/submit` | user | KYC submission form (DID + date of birth + document upload) |
+| `/submit?resubmit=:id` | user | Re-submission mode — DID pre-filled and locked, new documents required |
+| `/status/:id` | user | KYC record status, history, and wallet credential issuance QR |
+| `/verifier` | verifier | Admin panel — approve, reject, and revoke records |
+| `/bank` | bank | Bank portal — ZKP proof verification flow |
 
-## KYC submission flow (frontend side)
+## Components
 
-1. User enters or generates a DID (`POST /api/did` via "Generate one for me")
-2. Uploads passport (required) + selfie (required) + optional docs
-3. Each file is read as base64 (`FileReader`) and sent in `POST /api/kyc`
-4. On success, the Application ID is shown with a direct link to `/status/:id`
+### `KYCForm` (`components/KYCForm/`)
+DID input + date-of-birth picker + multi-document uploader. Accepts `initialDid` / `lockDid` props for re-submission mode (prevents changing the DID after an initial submission).
 
-Required documents are validated both client-side (`KYCForm`) and server-side (Zod schema).
+### `DocumentUpload` (`components/DocumentUpload/`)
+Single-file drop zone. Used by `KYCForm` for each document type (passport + selfie).
 
-## Verifier panel
+### `VerificationStatus` (`components/VerificationStatus/`)
+Status badge, human-readable status description, and action buttons:
+- **Show History** — expands on-chain audit trail
+- **Update Documents** — available on `VERIFIED` and `REJECTED` status; navigates to re-submission form
+- **Receive Credential in BC Wallet** — available on `VERIFIED`; shows QR code and auto-polls for connection, then auto-issues the VC
 
-Three tabs: **Pending Review** / **Verified** / **Rejected**. Each tab fetches `GET /api/kyc?status=<TAB>`.
+## State Machine (as reflected in the UI)
 
-Actions available per tab:
+```
+PENDING  → user waiting for verifier action
+VERIFIED → "Update Documents" + wallet QR available
+REJECTED → "Update Documents" available; can resubmit (NOT a terminal state)
+REVOKED  → terminal, no further actions
+DELETED  → GDPR erasure complete; no further actions
+```
 
-| Tab | Actions |
-|-----|---------|
-| Pending | View Docs, Approve, Reject |
-| Verified | Revoke |
-| Rejected | — (terminal) |
+`REJECTED` is **not** terminal — the applicant can always resubmit updated documents.
 
-**View Docs** decrypts and previews all submitted documents from IPFS (`GET /api/kyc/:id/documents`). Images are rendered inline; PDFs offer a download link. MIME type is inferred from the file extension.
+## Auth Flow
 
-**Approve** calls `PUT /api/kyc/:id/verify`. The credential definition ID defaults to `REACT_APP_CRED_DEF_ID` and can be overridden per-action in the modal.
+1. User navigates to any protected route → `RequireAuth` / `RequireVerifier` / `RequireBank` guard redirects to `/login?redirect=<path>`
+2. Login form calls `POST /api/auth/login` → stores JWT + role in `localStorage`
+3. On success, fires `window.dispatchEvent(new Event('auth-change'))` so `App.tsx` re-renders nav links
+4. Redirects back to the originally requested page
 
-## Environment variables
+## Verifier Admin Panel (`/verifier`)
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `REACT_APP_API_URL` | `http://localhost:3000` | Backend API base URL |
-| `REACT_APP_CRED_DEF_ID` | — | Default cred def ID pre-filled in the Approve modal. Update after each `provision.sh` run. |
+Three tabs:
 
-Set these in the root `.env` file (CRA picks up `REACT_APP_*` automatically).
+| Tab | Records shown | Actions available |
+|-----|--------------|-------------------|
+| Pending | `PENDING` | View documents (passport + selfie preview), Approve, Reject |
+| Verified | `VERIFIED` | Revoke |
+| Rejected | `REJECTED` | View documents; applicant can resubmit from their Status page |
+
+## Bank Portal (`/bank`)
+
+Step machine driven by polling:
+
+```
+idle → QR displayed → waiting for proof → verified / failed
+```
+
+1. Click **Start Verification** → calls `POST /api/bank/invitation` → QR rendered
+2. User scans with BC Wallet → DIDComm connection established
+3. **Send Proof Request** → calls `POST /api/bank/proof-request` with `age ≥ 18` ZKP predicate
+4. Polls `GET /api/bank/proof-result/:presExId` → displays **"Identity Verified — age ≥ 18 confirmed via ZKP"** or rejection
+
+No PII is revealed to the bank — only the ZKP predicate result.
+
+## API Client (`services/api.ts`)
+
+Typed `APIClient` class covering all endpoints:
+- `submitKYC`, `getKYC`, `getKYCHistory`, `resubmitKYC`, `verifyKYC`, `rejectKYC`, `revokeKYC`, `deleteKYC`
+- `getWalletInvitation`, `getWalletConnection`, `sendCredential`
+- `createBankInvitation`, `getBankConnection`, `sendProofRequest`, `getProofResult`
+- `createDID`, `getDID`
+- `login`
+
+Axios interceptors attach the JWT Bearer token from `localStorage` to every request.
+
+## Development
+
+```bash
+cd frontend
+npm install --legacy-peer-deps
+npm start          # CRA dev server on :3000
+npm test           # jest
+npm run build      # production build → build/
+```
 
 ## Docker
 
-The production image is served by nginx on port 80. After rebuilding:
+The frontend image bakes in two build-time variables:
 
 ```bash
-docker compose build frontend
+docker compose build \
+  --build-arg REACT_APP_API_URL=https://your-domain.example.com \
+  --build-arg REACT_APP_CRED_DEF_ID=<cred_def_id_from_provision.sh> \
+  frontend
 docker compose up -d --force-recreate frontend
 ```
 
-`nginx.conf` proxies `/api/` to the backend service, so the frontend only needs to know about its own origin.
+`REACT_APP_CRED_DEF_ID` must match the value in `.env` (`KYC_CRED_DEF_ID`). After re-provisioning ACA-Py, rebuild the frontend image.
 
-## Testing
+## Known Peer Dependency Notes
 
-```bash
-npm test              # watch mode
-npm test -- --watchAll=false   # single run (CI)
-```
-
-Tests use Jest + React Testing Library. `axios` is mocked via `jest.mock` — no live backend required.
+| Package | Fix applied |
+|---------|-------------|
+| `ajv` peer conflict (CRA) | `"overrides": { "ajv": "^8.0.0" }` in `package.json` |
+| ESLint plugin CRA conflict | `DISABLE_ESLINT_PLUGIN=true` in `Dockerfile` |
+| `@types/jest` missing | Added to `devDependencies` |

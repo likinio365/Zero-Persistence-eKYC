@@ -1,91 +1,107 @@
-# ACA-Py — Verifiable Credentials Agent
+# ACA-Py — Verifiable Credentials Agents
 
-Handles self-sovereign identity (SSI) for the KYC system using Hyperledger Aries Cloud Agent Python.
+Two ACA-Py (Aries Cloud Agent Python) instances handle the SSI layer of the KYC system.
+
+| Agent | Port (inbound) | Port (admin) | Role |
+|-------|---------------|--------------|------|
+| `acapy-agent` | 8030 | 8031 (localhost only) | KYC Issuer |
+| `bank-acapy` | 8040 | 8041 (localhost only) | Bank Verifier |
 
 ## Responsibilities
 
+**KYC Issuer (`acapy-agent`)**
 - Maintains a public DID registered on the Indy ledger (BCovrin test network)
-- Registers the KYC schema and credential definition on the ledger
-- Issues Verifiable Credentials (VCs) to holders over DIDComm connections
-- Revokes VCs (disabled — see Limitations)
+- Registers the KYC schema v3.0 + credential definition on the ledger
+- Issues Verifiable Credentials to holders over DIDComm connections
+- Revokes VCs (tails-server running; accumulator published to BCovrin)
+
+**Bank Verifier (`bank-acapy`)**
+- Creates DIDComm OOB invitations (QR codes) for bank verification
+- Sends AnonCreds proof requests with `age ≥ 18` ZKP predicate
+- Verifies proofs against BCovrin ledger — no contact with KYC backend required
 
 ## Directory structure
 
 ```
 acapy/
 ├── scripts/
-│   └── provision.sh       # one-time setup: DID + schema + cred def registration
-├── state/
-│   └── provision.json     # output of provision.sh — schema/cred def IDs used by backend
-└── README.md
+│   ├── provision.sh          # one-time: DID + schema v3.0 + cred def registration
+│   ├── acapy-start.sh        # entrypoint: fetch Vault secrets → exec aca-py start
+│   └── bank-acapy-start.sh   # same for bank agent
+└── state/
+    └── provision.json        # output of provision.sh (gitignored — regenerated each run)
 ```
 
-## Provisioning
+## Schema v3.0
 
-Run once after `docker compose up` (and again after any `docker compose down -v`):
+| Field | Value |
+|-------|-------|
+| Name | `kyc` |
+| Version | `3.0` |
+| Attributes | `kyc_id`, `verification_date`, `age` |
+| Ledger | BCovrin test (`https://test.bcovrin.vonx.io`) |
+
+The `age` attribute is computed server-side from `dateOfBirth` at verification time. The bank uses a ZKP predicate (`age >= 18`) — the actual age value is never revealed to the verifier.
+
+PII (name, documents) stays encrypted on IPFS. The VC proves only that a KYC verification was completed and the holder meets the age requirement.
+
+## Provisioning (first time or after full teardown)
 
 ```bash
 bash acapy/scripts/provision.sh
 ```
 
-The script is idempotent — it skips steps that are already done. On success it writes
-`state/provision.json` with the IDs the backend needs.
+The script:
+1. Registers a new DID on BCovrin (or uses existing if already set as public)
+2. Registers schema v3.0 on BCovrin
+3. Creates a credential definition with revocation support
+4. Writes `acapy/state/provision.json` + updates `.env` with `KYC_CRED_DEF_ID`
 
-After provisioning, verify the public DID is set:
+After provisioning, rebuild the frontend to bake in the new cred def:
 
 ```bash
-curl -s http://localhost:8031/wallet/did/public | jq .
+docker compose build frontend
+docker compose up -d --force-recreate frontend
 ```
 
-## Schema
-
-| Field | Value |
-|-------|-------|
-| Name | `kyc` |
-| Version | `2.0` |
-| Attributes | `kyc_id`, `verification_date` |
-| Ledger | BCovrin test (`https://test.bcovrin.vonx.io`) |
-
-PII (name, date of birth, documents) stays encrypted on IPFS. The VC proves only that a
-KYC verification was completed — not the underlying personal data.
-
-## Credential issuance flow
-
-1. Holder creates a DID via `POST /api/did`
-2. Holder establishes a DIDComm connection via `POST /api/did/:did/connect` (OOB invitation)
-3. Verifier approves KYC via `PUT /api/kyc/:id/verify` → backend calls ACA-Py `POST /issue-credential-2.0/send`
-4. ACA-Py delivers the VC to the holder's wallet over the DIDComm connection
-
-A DIDComm connection must be active before step 3. VC issuance is best-effort — if no
-connection exists, the Fabric ledger transition (`PENDING → VERIFIED`) still succeeds and
-a warning is returned.
-
-## Indy ledger
-
-ACA-Py connects to the **BCovrin public test ledger** (internet access required). There is
-no local `indy-node` container. For a fully offline setup, deploy
-[von-network](https://github.com/bcgov/von-network) and set:
+Verify the public DID is set:
 
 ```bash
+curl -s http://localhost:8031/wallet/did/public | python3 -m json.tool
+```
+
+## VC Issuance Flow (wallet QR)
+
+1. Applicant's KYC is approved (`PENDING → VERIFIED`)
+2. Applicant clicks **"Receive Credential in BC Wallet"** on the Status page
+3. Backend creates OOB invitation → QR displayed
+4. Applicant scans with BC Wallet → DIDComm connection established
+5. Backend calls `POST /issue-credential-2.0/send` → VC delivered to wallet
+
+## Revocation
+
+Revocation is fully enabled:
+
+- tails-server running at `localhost:6543`
+- Revocation accumulator published to BCovrin
+- Bank proof requests include `non_revoked: { to: now }` — revoked credentials are rejected
+
+After `docker compose down -v`, the tails file must be re-uploaded manually (see root README — Post-teardown Recovery).
+
+## Indy Ledger
+
+ACA-Py connects to the **BCovrin public test ledger** — internet access required at runtime. There is no local `indy-node` container. For a fully offline setup:
+
+```bash
+# Run von-network locally
+git clone https://github.com/bcgov/von-network && cd von-network
+./manage build && ./manage start
+
+# Set in .env
 INDY_GENESIS_URL=http://localhost:9000/genesis
+INDY_LEDGER_URL=http://localhost:9000
 ```
 
-## After `docker compose down -v`
+## Secrets at Runtime
 
-The ACA-Py wallet is wiped. You must:
-
-1. Re-run `provision.sh` — a new DID will be created and registered on BCovrin
-2. Set the new DID as public:
-   ```bash
-   curl -X POST "http://localhost:8031/wallet/did/public?did=<NEW_DID>" \
-     -H "Content-Type: application/json" -d '{}'
-   ```
-3. Update `ACAPY_PUBLIC_DID` in `.env` if used
-
-## Limitations
-
-| Limitation | Detail |
-|------------|--------|
-| Revocation disabled | `support_revocation: false` — no tails server configured. Revoking a VC on the Fabric ledger does not invalidate an already-issued VC in a holder's wallet. |
-| DIDs not publicly resolvable | `createDID` writes to the local wallet only — no NYM transaction is published. Fix: call `POST /ledger/register-nym` or switch to `did:peer`. |
-| No tails server | Required to enable revocation. Deploy `bcgov/indy-tails-server` and set `ACAPY_TAILS_SERVER_BASE_URL` in `.env`. |
+Both agents fetch their wallet key and Postgres password from HashiCorp Vault KV at startup (not from environment variables directly). The startup scripts (`acapy-start.sh`, `bank-acapy-start.sh`) use a Python one-liner to call the Vault HTTP API, then `exec aca-py start`.
