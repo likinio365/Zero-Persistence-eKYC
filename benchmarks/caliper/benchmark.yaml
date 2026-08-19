@@ -1,0 +1,55 @@
+test:
+  name: KYC Chaincode Benchmark
+  description: >
+    Measures pure Hyperledger Fabric throughput for the KYC chaincode
+    (SubmitKYC invoke) — no HTTP/IPFS/Vault overhead.
+
+  workers:
+    number: 1
+
+  rounds:
+    - label: SubmitKYC — 1 TPS (warm-up)
+      description: Single worker, low rate — establishes baseline latency
+      txDuration: 30
+      rateControl:
+        type: fixed-rate
+        opts:
+          tps: 1
+      workload:
+        module: workload/submitKYC.js
+
+    - label: SubmitKYC — 5 TPS
+      txDuration: 60
+      rateControl:
+        type: fixed-rate
+        opts:
+          tps: 5
+      workload:
+        module: workload/submitKYC.js
+
+    - label: SubmitKYC — 10 TPS
+      txDuration: 60
+      rateControl:
+        type: fixed-rate
+        opts:
+          tps: 10
+      workload:
+        module: workload/submitKYC.js
+
+    - label: SubmitKYC — 20 TPS
+      txDuration: 60
+      rateControl:
+        type: fixed-rate
+        opts:
+          tps: 20
+      workload:
+        module: workload/submitKYC.js
+
+    - label: SubmitKYC — 50 TPS (saturation test)
+      txDuration: 60
+      rateControl:
+        type: fixed-rate
+        opts:
+          tps: 50
+      workload:
+        module: workload/submitKYC.js

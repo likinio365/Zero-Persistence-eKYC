@@ -1,0 +1,54 @@
+test:
+  name: KYC Chaincode Saturation Test
+  description: >
+    Finds the saturation point of the Hyperledger Fabric chaincode.
+    Escalates TPS until throughput plateaus or errors appear.
+
+  workers:
+    number: 1
+
+  rounds:
+    - label: SubmitKYC — 50 TPS (baseline)
+      txDuration: 30
+      rateControl:
+        type: fixed-rate
+        opts:
+          tps: 50
+      workload:
+        module: workload/submitKYC.js
+
+    - label: SubmitKYC — 100 TPS
+      txDuration: 60
+      rateControl:
+        type: fixed-rate
+        opts:
+          tps: 100
+      workload:
+        module: workload/submitKYC.js
+
+    - label: SubmitKYC — 150 TPS
+      txDuration: 60
+      rateControl:
+        type: fixed-rate
+        opts:
+          tps: 150
+      workload:
+        module: workload/submitKYC.js
+
+    - label: SubmitKYC — 200 TPS
+      txDuration: 60
+      rateControl:
+        type: fixed-rate
+        opts:
+          tps: 200
+      workload:
+        module: workload/submitKYC.js
+
+    - label: SubmitKYC — 300 TPS
+      txDuration: 60
+      rateControl:
+        type: fixed-rate
+        opts:
+          tps: 300
+      workload:
+        module: workload/submitKYC.js

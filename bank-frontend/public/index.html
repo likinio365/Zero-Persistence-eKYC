@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Demo Bank — Identity Verification</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f4ff;min-height:100vh}
+    nav{background:#1a237e;color:white;padding:.75rem 1.5rem;display:flex;align-items:center;justify-content:space-between}
+    nav .brand{font-weight:700;font-size:1.1rem}
+    nav button{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);color:white;padding:.35rem .9rem;border-radius:4px;cursor:pointer;font-size:.9rem}
+    nav button:hover{background:rgba(255,255,255,.25)}
+    .container{max-width:560px;margin:2rem auto;padding:0 1rem}
+    .card{background:white;border-radius:10px;padding:2rem;box-shadow:0 2px 12px rgba(0,0,0,.08)}
+    h2{color:#1a237e;margin-bottom:.5rem}
+    .sub{color:#555;margin-bottom:1.5rem;font-size:.95rem;line-height:1.5}
+    .btn{padding:.7rem 2rem;background:#1a237e;color:white;border:none;border-radius:6px;font-size:1rem;font-weight:600;cursor:pointer}
+    .btn:hover{background:#283593}
+    .btn-sm{padding:.4rem 1rem;font-size:.85rem}
+    .btn-outline{background:white;color:#1a237e;border:1px solid #1a237e}
+    .btn-outline:hover{background:#e8eaf6}
+    input{width:100%;padding:.55rem .75rem;border:1px solid #ccc;border-radius:6px;font-size:1rem;margin-top:4px}
+    input:focus{outline:none;border-color:#1a237e;box-shadow:0 0 0 2px rgba(26,35,126,.15)}
+    label{font-size:.85rem;font-weight:600;color:#333}
+    .field{margin-bottom:1rem}
+    .error{color:#c62828;font-size:.85rem;margin:.5rem 0}
+    .step-box{text-align:center;padding:1.5rem 0}
+    .icon{font-size:4rem;margin-bottom:.75rem}
+    .qr-wrap{display:flex;justify-content:center;margin:1rem 0}
+    #qr-canvas{border-radius:8px}
+    .waiting{color:#666;font-size:.9rem;margin-top:.5rem}
+    ul{text-align:left;display:inline-block;color:#444;line-height:1.9;margin-top:.5rem}
+    .badge{display:inline-block;background:#e8f5e9;color:#2e7d32;border-radius:20px;padding:.2rem .8rem;font-size:.8rem;font-weight:600;margin-top:.25rem}
+    .login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}
+    .login-card{background:white;padding:2.5rem;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,.1);width:340px}
+    .login-icon{font-size:2.5rem;text-align:center;margin-bottom:.5rem}
+    .login-title{text-align:center;color:#1a237e;margin-bottom:.25rem}
+    .login-sub{text-align:center;color:#666;font-size:.9rem;margin-bottom:1.5rem}
+    #nav-section{display:none}
+  </style>
+</head>
+<body>
+
+<!-- NAV (shown after login) -->
+<nav id="nav-section">
+  <span class="brand">🏦 Demo Bank — Identity Verification</span>
+  <button onclick="logout()">Logout</button>
+</nav>
+
+<!-- LOGIN -->
+<div class="login-wrap" id="login-section">
+  <div class="login-card">
+    <div class="login-icon">🏦</div>
+    <h2 class="login-title">Demo Bank</h2>
+    <p class="login-sub">Identity Verification Portal</p>
+    <div class="field">
+      <label>Username</label>
+      <input id="username" type="text" autocomplete="username" placeholder="bank"/>
+    </div>
+    <div class="field">
+      <label>Password</label>
+      <input id="password" type="password" autocomplete="current-password"/>
+    </div>
+    <p class="error" id="login-error"></p>
+    <button class="btn" style="width:100%" onclick="doLogin()">Sign In</button>
+  </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="app-section" style="display:none">
+  <div class="container">
+    <div class="card">
+      <h2>Customer KYC Verification</h2>
+      <p class="sub">
+        Verify a customer's identity using their self-sovereign KYC credential.<br>
+        The bank verifies the ZKP proof directly against the Indy ledger —
+        <strong>no contact with the KYC provider's servers</strong>.
+      </p>
+
+      <!-- idle -->
+      <div id="s-idle">
+        <button class="btn" onclick="startVerification()">Start Customer Verification</button>
+      </div>
+
+      <!-- waiting-scan -->
+      <div id="s-scan" style="display:none" class="step-box">
+        <p><strong>Step 1:</strong> Customer scans this QR code with their <strong>BC Wallet</strong></p>
+        <div class="qr-wrap"><div id="qr-canvas"></div></div>
+        <p class="waiting">⏳ Waiting for customer to scan…</p>
+        <button class="btn btn-outline btn-sm" style="margin-top:1rem" onclick="startVerification()">Reset</button>
+      </div>
+
+      <!-- waiting-proof -->
+      <div id="s-proof" style="display:none" class="step-box">
+        <div class="icon">🔗</div>
+        <p><strong>Customer connected.</strong></p>
+        <p class="waiting">Step 2: Proof request sent to wallet — waiting for customer to approve…</p>
+      </div>
+
+      <!-- verified -->
+      <div id="s-verified" style="display:none" class="step-box">
+        <div class="icon">✅</div>
+        <h3 style="color:#2e7d32;margin-bottom:.75rem">Identity Verified</h3>
+        <ul>
+          <li>KYC credential is valid and unrevoked</li>
+          <li>Age ≥ 18 confirmed via zero-knowledge proof</li>
+          <li>Verified against Hyperledger Indy public ledger</li>
+          <li>Exact age was <strong>not</strong> revealed to the bank</li>
+        </ul>
+        <div class="badge">✓ SSI Trust Triangle Complete</div>
+        <div style="margin-top:1.5rem">
+          <button class="btn" onclick="startVerification()">Verify Another Customer</button>
+        </div>
+      </div>
+
+      <!-- failed -->
+      <div id="s-failed" style="display:none" class="step-box">
+        <div class="icon">❌</div>
+        <h3 style="color:#c62828;margin-bottom:.75rem">Verification Failed</h3>
+        <p>The credential is invalid, revoked, or age predicate not satisfied.</p>
+        <button class="btn" style="margin-top:1rem" onclick="startVerification()">Try Again</button>
+      </div>
+
+      <!-- error -->
+      <div id="s-error" style="display:none">
+        <p class="error" id="err-msg"></p>
+        <button class="btn btn-outline btn-sm" onclick="startVerification()">Retry</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const API = '__API_URL__';
+  let TOKEN = localStorage.getItem('bank_token') || '';
+  let pollTimer = null;
+  let qrInstance = null;
+
+  function show(id) {
+    ['s-idle','s-scan','s-proof','s-verified','s-failed','s-error'].forEach(s => {
+      document.getElementById(s).style.display = s === id ? '' : 'none';
+    });
+  }
+
+  function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+  async function api(method, path, body) {
+    const res = await fetch(API + path, {
+      method,
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + TOKEN },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || res.statusText);
+    }
+    return res.json();
+  }
+
+  async function doLogin() {
+    const u = document.getElementById('username').value;
+    const p = document.getElementById('password').value;
+    document.getElementById('login-error').textContent = '';
+    try {
+      const data = await fetch(API + '/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: u, password: p })
+      }).then(r => r.json());
+      if (data.error) throw new Error(data.error);
+      if (data.role !== 'bank') throw new Error('Access denied: bank credentials required');
+      TOKEN = data.token;
+      localStorage.setItem('bank_token', TOKEN);
+      showApp();
+    } catch (e) {
+      document.getElementById('login-error').textContent = e.message;
+    }
+  }
+
+  function showApp() {
+    document.getElementById('login-section').style.display = 'none';
+    document.getElementById('nav-section').style.display = 'flex';
+    document.getElementById('app-section').style.display = '';
+    show('s-idle');
+  }
+
+  function logout() {
+    stopPoll();
+    TOKEN = '';
+    localStorage.removeItem('bank_token');
+    document.getElementById('login-section').style.display = '';
+    document.getElementById('nav-section').style.display = 'none';
+    document.getElementById('app-section').style.display = 'none';
+  }
+
+  async function startVerification() {
+    stopPoll();
+    show('s-idle');
+    // Clear old QR
+    const qrDiv = document.getElementById('qr-canvas');
+    qrDiv.innerHTML = '';
+    try {
+      const inv = await api('POST', '/api/bank/invitation');
+      // Generate QR
+      new QRCode(qrDiv, { text: inv.invitationUrl, width: 280, height: 280, correctLevel: QRCode.CorrectLevel.M });
+      show('s-scan');
+
+      pollTimer = setInterval(async () => {
+        try {
+          const conn = await api('GET', '/api/bank/connection/' + inv.oobId);
+          if (conn.connected && conn.connectionId) {
+            stopPoll();
+            show('s-proof');
+            const pr = await api('POST', '/api/bank/proof-request', { connectionId: conn.connectionId });
+            pollTimer = setInterval(async () => {
+              try {
+                const result = await api('GET', '/api/bank/proof-result/' + pr.presExId);
+                if (result.done) { stopPoll(); show(result.verified ? 's-verified' : 's-failed'); }
+              } catch {}
+            }, 2000);
+          }
+        } catch {}
+      }, 2000);
+    } catch (e) {
+      document.getElementById('err-msg').textContent = e.message;
+      show('s-error');
+    }
+  }
+
+  // Auto-restore session on load
+  document.getElementById('password').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+  if (TOKEN) showApp();
+</script>
+</body>
+</html>

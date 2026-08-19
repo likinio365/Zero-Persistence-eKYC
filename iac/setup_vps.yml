@@ -1,0 +1,179 @@
+---
+- name: VPS Initial Setup
+  hosts: kyc
+  become: yes
+
+  vars_files:
+    - users_vars_DO_NOT_SHARE.yml
+
+  vars:
+    ufw_allowed_ports:
+      - { port: "22",   proto: tcp }
+      - { port: "80",   proto: tcp }
+      - { port: "443",  proto: tcp }
+      - { port: "8030", proto: tcp }   # KYC ACA-Py inbound (BC Wallet ↔ KYC agent)
+      - { port: "8040", proto: tcp }   # Bank ACA-Py inbound (BC Wallet ↔ Bank agent)
+
+  # ─── USERS ────────────────────────────────────────────────────────────────
+  tasks:
+    - name: Create admin users with SSH access
+      user:
+        name: "{{ item.username }}"
+        state: present
+        shell: /bin/bash
+        groups: sudo
+        append: yes
+        create_home: yes
+      loop: "{{ admin_users }}"
+
+    - name: Set authorized keys for admin users
+      authorized_key:
+        user: "{{ item.username }}"
+        state: present
+        key: "{{ item.pub_key }}"
+      loop: "{{ admin_users }}"
+
+    - name: Allow admin users passwordless sudo
+      copy:
+        dest: "/etc/sudoers.d/{{ item.username }}"
+        content: "{{ item.username }} ALL=(ALL) NOPASSWD: ALL\n"
+        mode: '0440'
+        validate: /usr/sbin/visudo -cf %s
+      loop: "{{ admin_users }}"
+
+    - name: Create service accounts (no login)
+      user:
+        name: "{{ item.username }}"
+        state: present
+        shell: /usr/sbin/nologin
+        create_home: yes
+        password: "!"
+      loop: "{{ service_users }}"
+
+  # ─── SSH HARDENING ────────────────────────────────────────────────────────
+    - name: Harden sshd_config
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^#?PermitRootLogin',       line: 'PermitRootLogin no' }
+        - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication no' }
+        - { regexp: '^#?AllowUsers',             line: 'AllowUsers ans {{ admin_users | map(attribute="username") | join(" ") }}' }
+      notify: Restart sshd
+
+  # ─── DOCKER ───────────────────────────────────────────────────────────────
+    - name: Install Docker dependencies
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+        update_cache: yes
+
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: Install Docker
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+
+    - name: Enable and start Docker
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add admin users to docker group
+      user:
+        name: "{{ item.username }}"
+        groups: docker
+        append: yes
+      loop: "{{ admin_users }}"
+
+    - name: Add service accounts to docker group
+      user:
+        name: "{{ item.username }}"
+        groups: docker
+        append: yes
+      loop: "{{ service_users }}"
+
+  # ─── FIREWALL (UFW) ───────────────────────────────────────────────────────
+    - name: Install UFW
+      apt:
+        name: ufw
+        state: present
+
+    - name: Set UFW default policies
+      ufw:
+        direction: "{{ item.direction }}"
+        policy: "{{ item.policy }}"
+      loop:
+        - { direction: incoming, policy: deny }
+        - { direction: outgoing, policy: allow }
+
+    - name: Allow required ports
+      ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+      loop: "{{ ufw_allowed_ports }}"
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+
+  # ─── FAIL2BAN ─────────────────────────────────────────────────────────────
+    - name: Install fail2ban
+      apt:
+        name: fail2ban
+        state: present
+
+    - name: Configure fail2ban jail
+      copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [DEFAULT]
+          bantime  = -1
+          findtime = 10m
+          maxretry = 5
+
+          [sshd]
+          enabled  = true
+          port     = ssh
+          logpath  = %(sshd_log)s
+          backend  = %(sshd_backend)s
+        mode: '0644'
+      notify: Restart fail2ban
+
+    - name: Enable and start fail2ban
+      service:
+        name: fail2ban
+        state: started
+        enabled: yes
+
+  # ─── HANDLERS ─────────────────────────────────────────────────────────────
+  handlers:
+    - name: Restart sshd
+      service:
+        name: ssh
+        state: restarted
+
+    - name: Restart fail2ban
+      service:
+        name: fail2ban
+        state: restarted

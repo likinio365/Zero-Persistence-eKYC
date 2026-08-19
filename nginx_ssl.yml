@@ -1,0 +1,95 @@
+---
+- name: Nginx + SSL Setup
+  hosts: kyc
+  become: yes
+
+  vars:
+    domain: "your-domain.example.com"
+    email: "your-email@example.com"
+
+  tasks:
+  # ─── NGINX ────────────────────────────────────────────────────────────────
+    - name: Install Nginx and Certbot
+      apt:
+        name:
+          - nginx
+          - certbot
+          - python3-certbot-nginx
+        state: present
+        update_cache: yes
+
+    - name: Deploy Nginx config (HTTP — for certbot challenge)
+      copy:
+        dest: "/etc/nginx/sites-available/{{ domain }}"
+        content: |
+          server {
+              listen 80;
+              server_name {{ domain }};
+
+              # Backend API
+              location /api/ {
+                  proxy_pass         http://localhost:3000;
+                  proxy_set_header   Host              $host;
+                  proxy_set_header   X-Real-IP         $remote_addr;
+                  proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+                  proxy_set_header   X-Forwarded-Proto $scheme;
+              }
+
+              # Tails Server (for BC Wallet ZKP non-revocation proofs)
+              location /tails/ {
+                  proxy_pass         http://localhost:6543/;
+                  proxy_set_header   Host              $host;
+                  proxy_set_header   X-Real-IP         $remote_addr;
+                  proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+                  proxy_set_header   X-Forwarded-Proto $scheme;
+              }
+
+              # Frontend
+              location / {
+                  proxy_pass         http://localhost:3001;
+                  proxy_set_header   Host              $host;
+                  proxy_set_header   X-Real-IP         $remote_addr;
+                  proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+                  proxy_set_header   X-Forwarded-Proto $scheme;
+              }
+          }
+        mode: '0644'
+
+    - name: Enable site
+      file:
+        src: "/etc/nginx/sites-available/{{ domain }}"
+        dest: "/etc/nginx/sites-enabled/{{ domain }}"
+        state: link
+
+    - name: Remove default site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Test Nginx config
+      command: nginx -t
+      changed_when: false
+
+    - name: Reload Nginx
+      service:
+        name: nginx
+        state: reloaded
+        enabled: yes
+
+  # ─── SSL (CERTBOT) ────────────────────────────────────────────────────────
+    - name: Obtain SSL certificate
+      command: >
+        certbot --nginx
+        -d {{ domain }}
+        --non-interactive
+        --agree-tos
+        --email {{ email }}
+        --redirect
+      args:
+        creates: "/etc/letsencrypt/live/{{ domain }}/fullchain.pem"
+
+    - name: Enable Certbot auto-renew timer
+      systemd:
+        name: certbot.timer
+        state: started
+        enabled: yes

@@ -1,0 +1,26 @@
+name: KYC Fabric Network
+version: "2.0.0"
+
+caliper:
+  blockchain: fabric
+
+channels:
+  - channelName: kycchannel
+    contracts:
+      - id: kyccc
+
+organizations:
+  - mspid: Org1MSP
+    identities:
+      certificates:
+        - name: admin
+          clientPrivateKey:
+            path: ../../fabric/crypto-config/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp/keystore/priv_sk
+          clientSignedCert:
+            path: ../../fabric/crypto-config/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp/signcerts/Admin@org1.example.com-cert.pem
+    connectionProfile:
+      path: ./connection-profile.yaml
+      discover: true
+
+workers:
+  number: 4

@@ -1,0 +1,79 @@
+# ── Fabric generated artifacts ────────────────────────────────────────────────
+fabric/crypto-config/
+fabric/channel-artifacts/
+fabric/wallet/
+backend/wallet/
+
+# ── ACA-Py runtime state ──────────────────────────────────────────────────────
+# Written by acapy/scripts/provision.sh; stale after docker compose down -v
+acapy/state/
+
+# ── Node.js ───────────────────────────────────────────────────────────────────
+node_modules/
+backend/dist/
+frontend/build/
+coverage/
+*.tsbuildinfo
+*.log
+npm-debug.log*
+yarn-error.log*
+yarn-debug.log*
+.pnpm-debug.log*
+
+# ── Go ────────────────────────────────────────────────────────────────────────
+chaincode/vendor/
+chaincode/vendor.bak/
+# compiled binary and test artefacts
+chaincode/chaincode
+chaincode/*.out
+chaincode/*.test
+
+# ── Environment & secrets ─────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Test documents ────────────────────────────────────────────────────────────
+test-docs/
+
+# ── Docker overrides & runtime ────────────────────────────────────────────────
+docker-compose.override.yml
+.docker/
+
+# ── Certificates & keys (generated at runtime) ────────────────────────────────
+*.pem
+*.key
+*.crt
+*.p12
+*.jks
+
+# ── ELK Stack data ────────────────────────────────────────────────────────────
+elasticsearch-data/
+kibana-data/
+
+# ── IAC — deployment-specific secrets & inventory ────────────────────────────
+iac/hosts.ini
+iac/users_vars_DO_NOT_SHARE.yml
+
+# ── Thesis / paper drafts ─────────────────────────────────────────────────────
+trash/
+thesis/
+
+# ── Caliper benchmark results ─────────────────────────────────────────────────
+benchmarks/results/
+benchmarks/caliper/node_modules/
+
+# ── Claude AI project files ───────────────────────────────────────────────────
+CLAUDE.md
+.claude/
