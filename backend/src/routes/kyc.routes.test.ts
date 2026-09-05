@@ -18,10 +18,16 @@ jest.mock('../config/logger', () => ({
   logger: { debug: jest.fn(), info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
-const mockVault  = { createKey: jest.fn(), encrypt: jest.fn(), decrypt: jest.fn() };
-const mockFabric = { submitKYC: jest.fn(), getKYC: jest.fn(), verifyKYC: jest.fn(), revokeKYC: jest.fn(), queryByDID: jest.fn() };
-const mockIndy   = { issueCredential: jest.fn(), revokeCredential: jest.fn() };
-const mockIpfs   = { upload: jest.fn(), download: jest.fn() };
+const mockVault  = { createKey: jest.fn(), encrypt: jest.fn(), decrypt: jest.fn(), deleteKey: jest.fn() };
+const mockFabric = {
+  submitKYC: jest.fn(), getKYC: jest.fn(), verifyKYC: jest.fn(), revokeKYC: jest.fn(),
+  queryByDID: jest.fn(), storeCredExchangeId: jest.fn(), eraseKYC: jest.fn(),
+};
+const mockIndy   = {
+  issueCredential: jest.fn(), revokeCredential: jest.fn(),
+  revokeCredentialAndPublish: jest.fn(), revokeCredentialsForDID: jest.fn(),
+};
+const mockIpfs   = { upload: jest.fn(), download: jest.fn(), unpin: jest.fn() };
 
 jest.mock('../services/vault.service',  () => ({ VaultService:  jest.fn(() => mockVault) }));
 jest.mock('../services/fabric.service', () => ({ FabricService: jest.fn(() => mockFabric) }));
@@ -70,8 +76,14 @@ beforeEach(() => {
   mockFabric.verifyKYC.mockResolvedValue(undefined);
   mockFabric.revokeKYC.mockResolvedValue(undefined);
   mockFabric.queryByDID.mockResolvedValue([PENDING_RECORD]);
+  mockFabric.storeCredExchangeId.mockResolvedValue(undefined);
+  mockFabric.eraseKYC.mockResolvedValue(undefined);
   mockIndy.issueCredential.mockResolvedValue({ credentialId: 'ex-1', credentialExchangeId: 'ex-1', state: 'offer-sent', did: 'did:indy:test:Alice' });
   mockIndy.revokeCredential.mockResolvedValue(undefined);
+  mockIndy.revokeCredentialAndPublish.mockResolvedValue(undefined);
+  mockIndy.revokeCredentialsForDID.mockResolvedValue(0);
+  mockVault.deleteKey.mockResolvedValue(undefined);
+  mockIpfs.unpin.mockResolvedValue(undefined);
 });
 
 // ── POST /api/kyc ──────────────────────────────────────────────────────────────
@@ -236,15 +248,15 @@ describe('PUT /api/kyc/:id/revoke', () => {
     expect(mockFabric.revokeKYC).toHaveBeenCalledWith('kyc-1');
   });
 
-  it('also revokes the VC when credentialExchangeId is on the record', async () => {
+  it('also revokes the VC (and publishes the accumulator) when credentialExchangeId is on the record', async () => {
     mockFabric.getKYC.mockResolvedValueOnce({ ...VERIFIED_RECORD, credentialExchangeId: 'ex-99' });
     await request(app).put('/api/kyc/kyc-1/revoke').send({});
-    expect(mockIndy.revokeCredential).toHaveBeenCalledWith('ex-99');
+    expect(mockIndy.revokeCredentialAndPublish).toHaveBeenCalledWith('ex-99');
   });
 
   it('skips VC revocation when credentialExchangeId is absent', async () => {
     await request(app).put('/api/kyc/kyc-1/revoke').send({});
-    expect(mockIndy.revokeCredential).not.toHaveBeenCalled();
+    expect(mockIndy.revokeCredentialAndPublish).not.toHaveBeenCalled();
   });
 
   it('returns 404 when record not found', async () => {
@@ -262,6 +274,79 @@ describe('PUT /api/kyc/:id/revoke', () => {
   it('returns 500 on service error', async () => {
     mockFabric.revokeKYC.mockRejectedValueOnce(new Error('ledger error'));
     const res = await request(app).put('/api/kyc/kyc-1/revoke').send({});
+    expect(res.status).toBe(500);
+  });
+});
+
+// ── DELETE /api/kyc/:id (GDPR Art. 17) ────────────────────────────────────────
+
+describe('DELETE /api/kyc/:id', () => {
+  const VERIFIED_WITH_VC = { ...VERIFIED_RECORD, status: 'VERIFIED' as const, credentialExchangeId: 'ex-77' };
+
+  it('returns 200 with erased:true and records the erasure on-chain', async () => {
+    mockFabric.getKYC.mockResolvedValueOnce(VERIFIED_WITH_VC);
+    const res = await request(app).delete('/api/kyc/kyc-1');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ id: 'kyc-1', erased: true });
+    expect(mockFabric.eraseKYC).toHaveBeenCalledWith('kyc-1');
+    expect(mockVault.deleteKey).toHaveBeenCalledWith('kyc-1');
+  });
+
+  it('revokes the VC (with accumulator publish) BEFORE erasing when the exchange ID is on-chain', async () => {
+    mockFabric.getKYC.mockResolvedValueOnce(VERIFIED_WITH_VC);
+    await request(app).delete('/api/kyc/kyc-1');
+    expect(mockIndy.revokeCredentialAndPublish).toHaveBeenCalledWith('ex-77');
+    const revokeOrder = mockIndy.revokeCredentialAndPublish.mock.invocationCallOrder[0];
+    const eraseOrder  = mockFabric.eraseKYC.mock.invocationCallOrder[0];
+    expect(revokeOrder).toBeLessThan(eraseOrder);
+  });
+
+  it('falls back to a DID sweep when no credentialExchangeId is on the record', async () => {
+    mockFabric.getKYC.mockResolvedValueOnce({ ...VERIFIED_RECORD, status: 'VERIFIED' as const });
+    mockIndy.revokeCredentialsForDID.mockResolvedValueOnce(1);
+    const res = await request(app).delete('/api/kyc/kyc-1');
+    expect(res.status).toBe(200);
+    expect(mockIndy.revokeCredentialsForDID).toHaveBeenCalledWith('did:indy:test:Alice');
+    expect(mockIndy.revokeCredentialAndPublish).not.toHaveBeenCalled();
+    expect(res.body.vcWarning).toBeUndefined();
+  });
+
+  it('returns a vcWarning when the DID sweep revokes nothing', async () => {
+    mockFabric.getKYC.mockResolvedValueOnce({ ...VERIFIED_RECORD, status: 'VERIFIED' as const });
+    mockIndy.revokeCredentialsForDID.mockResolvedValueOnce(0);
+    const res = await request(app).delete('/api/kyc/kyc-1');
+    expect(res.status).toBe(200);
+    expect(res.body.erased).toBe(true);
+    expect(typeof res.body.vcWarning).toBe('string');
+  });
+
+  it('still erases (200) even if VC revocation throws', async () => {
+    mockFabric.getKYC.mockResolvedValueOnce(VERIFIED_WITH_VC);
+    mockIndy.revokeCredentialAndPublish.mockRejectedValueOnce(new Error('acapy down'));
+    const res = await request(app).delete('/api/kyc/kyc-1');
+    expect(res.status).toBe(200);
+    expect(res.body.erased).toBe(true);
+    expect(res.body.vcWarning).toContain('acapy down');
+    expect(mockFabric.eraseKYC).toHaveBeenCalledWith('kyc-1');
+  });
+
+  it('returns 409 when the record is already DELETED', async () => {
+    mockFabric.getKYC.mockResolvedValueOnce({ ...VERIFIED_RECORD, status: 'DELETED' as const });
+    const res = await request(app).delete('/api/kyc/kyc-1');
+    expect(res.status).toBe(409);
+    expect(mockFabric.eraseKYC).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when the record does not exist', async () => {
+    mockFabric.getKYC.mockResolvedValueOnce(null);
+    const res = await request(app).delete('/api/kyc/missing');
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 500 when eraseKYC throws', async () => {
+    mockFabric.getKYC.mockResolvedValueOnce(VERIFIED_WITH_VC);
+    mockFabric.eraseKYC.mockRejectedValueOnce(new Error('ledger down'));
+    const res = await request(app).delete('/api/kyc/kyc-1');
     expect(res.status).toBe(500);
   });
 });

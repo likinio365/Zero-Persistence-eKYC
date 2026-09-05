@@ -67,7 +67,39 @@ router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
     if (!record) return res.status(404).json({ error: 'KYC record not found' });
     if (record.status === 'DELETED') return res.status(409).json({ error: 'Record already erased' });
 
-    // Download manifest to collect all document CIDs before unpinning.
+    // ── 1. Revoke the VC FIRST ────────────────────────────────────────────────
+    // A credential already held in the applicant's wallet keeps satisfying a bank
+    // proof request until its revocation is published to the Indy ledger — deleting
+    // IPFS/Vault/on-chain data does nothing to it. Revocation only needs ACA-Py, so
+    // it runs before the rest of the teardown. Failure is non-fatal (GDPR still
+    // obliges us to erase) but is surfaced to the caller as `vcWarning`.
+    let vcWarning: string | undefined;
+    try {
+      if (record.credentialExchangeId) {
+        await indyService.revokeCredentialAndPublish(record.credentialExchangeId);
+        logger.info('VC revoked during erasure', { id, credExId: record.credentialExchangeId });
+      } else {
+        // The wallet-issuance flow may not have persisted the exchange ID on-chain
+        // (older records) — fall back to sweeping every credential on the DID.
+        const revoked = await indyService.revokeCredentialsForDID(record.did);
+        if (revoked > 0) {
+          logger.info('VC(s) revoked during erasure via DID sweep', { id, count: revoked });
+        } else if (record.status === 'VERIFIED') {
+          // A VERIFIED record almost certainly has a live wallet credential; failing
+          // to find/revoke it means it stays presentable at a verifier.
+          vcWarning =
+            'No credential exchange ID on record and none found for the DID — a ' +
+            'previously issued wallet credential may remain presentable until its ' +
+            'revocation registry is updated.';
+          logger.warn('Erasure could not revoke any VC', { id, did: record.did });
+        }
+      }
+    } catch (vcErr) {
+      vcWarning = vcErr instanceof Error ? vcErr.message : String(vcErr);
+      logger.warn('VC revocation failed during erasure (non-fatal, erasure continues)', { id, err: vcWarning });
+    }
+
+    // ── 2. Collect document CIDs from the manifest before unpinning. ───────────
     let documentCids: string[] = [];
     try {
       const manifestBuf = await ipfsService.download(record.ipfsHash);
@@ -80,33 +112,20 @@ router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
       logger.warn('Could not read manifest during erasure — proceeding without doc unpin', { id, e });
     }
 
-    // Unpin all document blobs and the manifest from IPFS.
+    // ── 3. Unpin all document blobs and the manifest from IPFS. ───────────────
     await Promise.allSettled([
       ...documentCids.map(cid => ipfsService.unpin(cid)),
       ipfsService.unpin(record.ipfsHash),
     ]);
 
-    // Delete the Vault transit key — ciphertext in IPFS becomes permanently undecryptable.
+    // ── 4. Delete the Vault transit key — IPFS ciphertext becomes undecryptable.
     await vaultService.deleteKey(id);
 
-    // Revoke the VC in ACA-Py so the wallet credential becomes invalid (GDPR Art. 17).
-    if (record.credentialExchangeId) {
-      try {
-        await indyService.revokeCredential(record.credentialExchangeId);
-        logger.info('VC revoked during erasure', { id, credExId: record.credentialExchangeId });
-      } catch (vcErr) {
-        logger.warn('VC revocation failed during erasure (non-fatal)', {
-          id, credExId: record.credentialExchangeId,
-          err: vcErr instanceof Error ? vcErr.message : String(vcErr),
-        });
-      }
-    }
-
-    // Record the erasure on-chain (clears ipfsHash, credDefId, credentialExchangeId, rejectionReason).
+    // ── 5. Record the erasure on-chain (clears ipfsHash, credDefId, credentialExchangeId, rejectionReason).
     await fabricService.eraseKYC(id);
 
-    logger.info('KYC erased (GDPR Art. 17)', { id });
-    res.json({ id, erased: true });
+    logger.info('KYC erased (GDPR Art. 17)', { id, vcWarning });
+    res.json({ id, erased: true, ...(vcWarning && { vcWarning }) });
   } catch (err) {
     logger.error('KYC erasure failed', { id, err });
     res.status(500).json({ error: 'KYC erasure failed' });
@@ -356,6 +375,17 @@ router.post('/:id/send-credential', authMiddleware, async (req: Request, res: Re
       ...(ageAttr !== undefined && { age: ageAttr }),
     });
 
+    // Persist the exchange ID on-chain so EraseKYC / RevokeKYC can revoke this VC
+    // later. Without this the wallet-issued credential has no on-chain handle and
+    // GDPR erasure cannot invalidate it at the bank. Mirrors PUT /:id/verify.
+    if (vc.credentialExchangeId) {
+      try {
+        await fabricService.storeCredExchangeId(id, vc.credentialExchangeId);
+      } catch (e) {
+        logger.warn('Failed to store credentialExchangeId on-chain (non-fatal)', { id, e });
+      }
+    }
+
     logger.info('VC sent to wallet', { id, credExId: vc.credentialExchangeId });
     res.json({ connected: true, credentialExchangeId: vc.credentialExchangeId });
   } catch (err) {
@@ -394,7 +424,7 @@ router.put('/:id/revoke', requireVerifier, async (req: Request, res: Response) =
     let vcWarning: string | undefined;
     if (credentialExchangeId) {
       try {
-        await indyService.revokeCredential(credentialExchangeId);
+        await indyService.revokeCredentialAndPublish(credentialExchangeId);
         logger.info('VC revoked', { id, credentialExchangeId });
       } catch (vcErr) {
         const msg = vcErr instanceof Error ? vcErr.message : String(vcErr);
@@ -428,7 +458,7 @@ router.put('/:id/resubmit', validateResubmitKYC, async (req: Request, res: Respo
     // so the previously issued credential must no longer be valid at the bank.
     if (record.status === 'VERIFIED' && record.credentialExchangeId) {
       try {
-        await indyService.revokeCredential(record.credentialExchangeId);
+        await indyService.revokeCredentialAndPublish(record.credentialExchangeId);
         logger.info('VC revoked on resubmit', { id, credentialExchangeId: record.credentialExchangeId });
       } catch (err) {
         logger.warn('VC revocation during resubmit failed (non-fatal)', { id, err });

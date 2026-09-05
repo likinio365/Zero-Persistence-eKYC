@@ -164,7 +164,10 @@ export class IndyService {
   // Revokes a previously issued credential and immediately publishes to the ledger.
   // Looks up cred_rev_id + rev_reg_id from the exchange record so revocation works
   // even if ACA-Py auto-removed the record (in that case we fall back to cred_ex_id).
-  async revokeCredential(credentialExchangeId: string): Promise<void> {
+  // Returns the rev_reg_id that was touched (when known) so the caller can force an
+  // explicit accumulator publish — see publishRevocationEntry().
+  async revokeCredential(credentialExchangeId: string): Promise<string | undefined> {
+    let revRegId: string | undefined;
     let revPayload: Record<string, unknown> = { cred_ex_id: credentialExchangeId, publish: true };
 
     try {
@@ -173,6 +176,7 @@ export class IndyService {
       }>(`/issue-credential-2.0/records/${credentialExchangeId}`);
       const { cred_rev_id, rev_reg_id } = rec.data.indy ?? {};
       if (cred_rev_id && rev_reg_id) {
+        revRegId = rev_reg_id;
         revPayload = { cred_rev_id, rev_reg_id, publish: true };
         logger.info('Revoking by cred_rev_id', { credentialExchangeId, cred_rev_id, rev_reg_id });
       }
@@ -185,6 +189,84 @@ export class IndyService {
       .catch(wrapError(`revokeCredential(${credentialExchangeId})`));
 
     logger.info('Credential revoked', { credentialExchangeId });
+    return revRegId;
+  }
+
+  // Forces the revocation registry accumulator delta onto the Indy ledger.
+  // ACA-Py's `publish: true` on /revocation/revoke is unreliable on BCovrin — the
+  // ledger write can throw internally and be swallowed, leaving the accumulator
+  // stale so verifiers still see the credential as valid. An explicit registry
+  // entry publish is the belt-and-braces follow-up.
+  async publishRevocationEntry(revRegId: string): Promise<void> {
+    await this.client
+      .post(`/revocation/registry/${revRegId}/entry`, {})
+      .catch(wrapError(`publishRevocationEntry(${revRegId})`));
+
+    logger.info('Revocation registry entry published to ledger', { revRegId });
+  }
+
+  // Revokes a credential and then forces its accumulator delta onto the ledger.
+  // The entry publish is best-effort: revocation itself has already been requested,
+  // so a publish failure is logged but not propagated.
+  async revokeCredentialAndPublish(credentialExchangeId: string): Promise<void> {
+    const revRegId = await this.revokeCredential(credentialExchangeId);
+    if (!revRegId) return;
+    try {
+      await this.publishRevocationEntry(revRegId);
+    } catch (err) {
+      logger.warn('Accumulator entry publish after revoke failed (non-fatal)', {
+        credentialExchangeId,
+        revRegId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Best-effort: revoke every credential ACA-Py has issued to `did` over its
+  // DIDComm connection. Used by GDPR erasure as a fallback when the on-chain
+  // credentialExchangeId was never persisted (the wallet-issuance flow). Returns
+  // the number of credentials revoked; a silent 0 means nothing matched.
+  async revokeCredentialsForDID(did: string): Promise<number> {
+    let connection: AcapyConnection | null = null;
+    try {
+      connection = await this.findConnectionByDID(did);
+    } catch (err) {
+      logger.warn('revokeCredentialsForDID: connection lookup failed', {
+        did, err: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (!connection) {
+      logger.warn('revokeCredentialsForDID: no active connection for DID — nothing revoked', { did });
+      return 0;
+    }
+
+    let records: AcapyCredExRecord[] = [];
+    try {
+      const resp = await this.client.get<AcapyCredExList>('/issue-credential-2.0/records', {
+        params: { connection_id: connection.connection_id },
+      });
+      records = resp.data.results ?? [];
+    } catch (err) {
+      logger.warn('revokeCredentialsForDID: records lookup failed', {
+        did, err: err instanceof Error ? err.message : String(err),
+      });
+      return 0;
+    }
+
+    let revoked = 0;
+    for (const rec of records) {
+      if (!rec.cred_ex_id) continue;
+      try {
+        await this.revokeCredentialAndPublish(rec.cred_ex_id);
+        revoked += 1;
+      } catch (err) {
+        logger.warn('revokeCredentialsForDID: one revoke failed', {
+          did, credExId: rec.cred_ex_id, err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    logger.info('revokeCredentialsForDID complete', { did, revoked });
+    return revoked;
   }
 
   // Returns all credential exchange records issued to the given DID.

@@ -286,6 +286,125 @@ describe('IndyService.revokeCredential', () => {
   });
 });
 
+describe('IndyService.revokeCredential (rev_reg_id return)', () => {
+  it('returns the rev_reg_id when the exchange record carries revocation metadata', async () => {
+    const client = makeClient();
+    client.get.mockResolvedValueOnce({ data: { indy: { cred_rev_id: '7', rev_reg_id: 'rr:1' } } });
+    client.post.mockResolvedValueOnce({ data: {} });
+
+    await expect(makeService(client).revokeCredential('ex-123')).resolves.toBe('rr:1');
+  });
+
+  it('POSTs /revocation/revoke by cred_rev_id + rev_reg_id when known', async () => {
+    const client = makeClient();
+    client.get.mockResolvedValueOnce({ data: { indy: { cred_rev_id: '7', rev_reg_id: 'rr:1' } } });
+    client.post.mockResolvedValueOnce({ data: {} });
+
+    await makeService(client).revokeCredential('ex-123');
+
+    expect(client.post).toHaveBeenCalledWith(
+      '/revocation/revoke',
+      { cred_rev_id: '7', rev_reg_id: 'rr:1', publish: true },
+    );
+  });
+});
+
+// ── publishRevocationEntry ────────────────────────────────────────────────────
+
+describe('IndyService.publishRevocationEntry', () => {
+  it('POSTs to /revocation/registry/{id}/entry', async () => {
+    const client = makeClient();
+    client.post.mockResolvedValueOnce({ data: {} });
+
+    await makeService(client).publishRevocationEntry('rr:1');
+
+    expect(client.post).toHaveBeenCalledWith('/revocation/registry/rr:1/entry', {});
+  });
+
+  it('throws with operation context on ACA-Py error', async () => {
+    const client = makeClient();
+    client.post.mockRejectedValueOnce(acapyError('ledger unavailable'));
+
+    await expect(makeService(client).publishRevocationEntry('rr:1'))
+      .rejects.toThrow('publishRevocationEntry(rr:1)');
+  });
+});
+
+// ── revokeCredentialAndPublish ────────────────────────────────────────────────
+
+describe('IndyService.revokeCredentialAndPublish', () => {
+  it('revokes then publishes the accumulator entry', async () => {
+    const client = makeClient();
+    client.get.mockResolvedValueOnce({ data: { indy: { cred_rev_id: '7', rev_reg_id: 'rr:1' } } });
+    client.post
+      .mockResolvedValueOnce({ data: {} })  // /revocation/revoke
+      .mockResolvedValueOnce({ data: {} }); // /revocation/registry/rr:1/entry
+
+    await makeService(client).revokeCredentialAndPublish('ex-123');
+
+    expect(client.post).toHaveBeenNthCalledWith(2, '/revocation/registry/rr:1/entry', {});
+  });
+
+  it('skips the entry publish when no rev_reg_id is known', async () => {
+    const client = makeClient();
+    client.get.mockResolvedValueOnce({ data: {} }); // no indy block
+    client.post.mockResolvedValueOnce({ data: {} });
+
+    await makeService(client).revokeCredentialAndPublish('ex-123');
+
+    expect(client.post).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not throw when the entry publish fails', async () => {
+    const client = makeClient();
+    client.get.mockResolvedValueOnce({ data: { indy: { cred_rev_id: '7', rev_reg_id: 'rr:1' } } });
+    client.post
+      .mockResolvedValueOnce({ data: {} })
+      .mockRejectedValueOnce(acapyError('ledger unavailable'));
+
+    await expect(makeService(client).revokeCredentialAndPublish('ex-123')).resolves.toBeUndefined();
+  });
+});
+
+// ── revokeCredentialsForDID ───────────────────────────────────────────────────
+
+describe('IndyService.revokeCredentialsForDID', () => {
+  it('returns 0 and revokes nothing when no connection exists for the DID', async () => {
+    const client = makeClient();
+    client.get.mockResolvedValueOnce({ data: { results: [] } }); // findConnectionByDID
+
+    const n = await makeService(client).revokeCredentialsForDID('did:indy:test:Nobody');
+
+    expect(n).toBe(0);
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it('revokes every credential exchange record on the DID connection', async () => {
+    const client = makeClient();
+    client.get
+      .mockResolvedValueOnce({ data: { results: [FAKE_CONNECTION] } })                 // findConnectionByDID
+      .mockResolvedValueOnce({ data: { results: [{ cred_ex_id: 'ex-1' }, { cred_ex_id: 'ex-2' }] } }) // records list
+      .mockResolvedValueOnce({ data: { indy: { cred_rev_id: '1', rev_reg_id: 'rr:1' } } })  // revoke ex-1 lookup
+      .mockResolvedValueOnce({ data: { indy: { cred_rev_id: '2', rev_reg_id: 'rr:1' } } }); // revoke ex-2 lookup
+    client.post.mockResolvedValue({ data: {} });
+
+    const n = await makeService(client).revokeCredentialsForDID('did:indy:test:Alice');
+
+    expect(n).toBe(2);
+  });
+
+  it('returns 0 when the records lookup fails', async () => {
+    const client = makeClient();
+    client.get
+      .mockResolvedValueOnce({ data: { results: [FAKE_CONNECTION] } })
+      .mockRejectedValueOnce(acapyError('storage not configured'));
+
+    const n = await makeService(client).revokeCredentialsForDID('did:indy:test:Alice');
+
+    expect(n).toBe(0);
+  });
+});
+
 // ── getCredentials ────────────────────────────────────────────────────────────
 
 describe('IndyService.getCredentials', () => {

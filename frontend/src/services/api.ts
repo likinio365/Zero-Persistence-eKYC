@@ -118,8 +118,11 @@ export class APIClient {
     return data;
   }
 
-  async requestErasure(id: string): Promise<void> {
-    await this.http.delete(`/api/kyc/${encodeURIComponent(id)}`);
+  async requestErasure(id: string): Promise<{ erased: boolean; vcWarning?: string }> {
+    const { data } = await this.http.delete<{ erased: boolean; vcWarning?: string }>(
+      `/api/kyc/${encodeURIComponent(id)}`,
+    );
+    return data;
   }
 
   async uploadDocument(file: File): Promise<UploadResponse> {

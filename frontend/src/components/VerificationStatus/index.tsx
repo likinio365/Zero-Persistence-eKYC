@@ -31,6 +31,7 @@ export default function VerificationStatus({ record }: Props) {
   // Request erasure (GDPR Art. 17)
   const [eraseStep, setEraseStep] = useState<'idle' | 'confirm' | 'loading' | 'done' | 'error'>('idle');
   const [eraseError, setEraseError] = useState<string | null>(null);
+  const [eraseWarning, setEraseWarning] = useState<string | null>(null);
 
   // Wallet credential flow
   const [walletStep, setWalletStep] = useState<'idle' | 'loading' | 'qr' | 'connected' | 'issued' | 'error'>('idle');
@@ -126,8 +127,10 @@ export default function VerificationStatus({ record }: Props) {
   const requestErasure = useCallback(async () => {
     setEraseStep('loading');
     setEraseError(null);
+    setEraseWarning(null);
     try {
-      await apiClient.requestErasure(record.id);
+      const result = await apiClient.requestErasure(record.id);
+      setEraseWarning(result.vcWarning ?? null);
       setEraseStep('done');
     } catch (err) {
       setEraseError(err instanceof Error ? err.message : 'Erasure failed');
@@ -289,9 +292,16 @@ export default function VerificationStatus({ record }: Props) {
           )}
           {eraseStep === 'loading' && <span style={{ fontSize: '0.9rem' }}>Erasing data…</span>}
           {eraseStep === 'done' && (
-            <p style={{ color: 'green', fontSize: '0.9rem' }}>
-              Your data has been permanently erased. The record on the ledger has been marked as DELETED.
-            </p>
+            <>
+              <p style={{ color: 'green', fontSize: '0.9rem' }}>
+                Your data has been permanently erased. The record on the ledger has been marked as DELETED.
+              </p>
+              {eraseWarning && (
+                <p style={{ color: '#b45309', fontSize: '0.85rem' }}>
+                  Note: {eraseWarning}
+                </p>
+              )}
+            </>
           )}
           {eraseStep === 'error' && (
             <div>

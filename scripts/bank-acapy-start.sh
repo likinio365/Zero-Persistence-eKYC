@@ -64,6 +64,7 @@ exec aca-py start \
   --auto-provision \
   --auto-accept-invites \
   --auto-accept-requests \
+  --auto-ping-connection \
   --label bank-agent \
   --log-level info \
   --tails-server-base-url "${ACAPY_TAILS_SERVER_BASE_URL:-http://tails-server:6543}"

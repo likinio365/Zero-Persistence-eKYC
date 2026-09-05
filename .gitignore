@@ -32,6 +32,7 @@ chaincode/*.test
 .env
 .env.local
 .env.*.local
+.env.bak.20260905-182831
 
 # ── IDE ───────────────────────────────────────────────────────────────────────
 .vscode/
@@ -74,6 +75,6 @@ thesis/
 benchmarks/results/
 benchmarks/caliper/node_modules/
 
-# ── Claude AI project files ───────────────────────────────────────────────────
-CLAUDE.md
-.claude/
+acapy-start.sh.bak
+bank-acapy-start.sh.bak
+
